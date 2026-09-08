@@ -1,0 +1,20 @@
+property,value
+participant,T16
+task,fig1 radial-8 attempted wrist movement
+alignment,delay
+source_file,fig1_T16_delay.h5
+n_trials,385
+n_go_trials,264
+n_nogo_trials,121
+n_channels,61
+n_time_bins,150
+bin_ms,20.0
+t_start_ms,-1000.0
+t_end_ms,1980.0
+n_blocks,6
+n_directions,8
+trials_per_direction_min,47
+trials_per_direction_max,49
+delay_values_s,"1, 1.5"
+mean_firing_rate_hz,8.16
+n_trials_with_nan_features,0

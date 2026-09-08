@@ -1,0 +1,15 @@
+# Time-resolved decoding of intended movement direction — prototype dependencies.
+# scikit-learn >= 1.5 is required: earlier builds are compiled against numpy 1.x
+# and crash on import under numpy 2.
+numpy>=2.0
+scipy>=1.11
+pandas>=2.0
+h5py>=3.9
+matplotlib>=3.8
+scikit-learn>=1.5
+jupyterlab>=4.0
+# ipykernel is pinned below 7: with 7.3.0, executing the widget-heavy notebook 00
+# headlessly (jupyter nbconvert --execute) intermittently deadlocks waiting for an
+# execute reply. 6.x runs it reliably. Interactive use is unaffected either way.
+ipykernel>=6.29,<7
+ipywidgets>=8.0
