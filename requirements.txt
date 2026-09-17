@@ -8,8 +8,14 @@ h5py>=3.9
 matplotlib>=3.8
 scikit-learn>=1.5
 jupyterlab>=4.0
-# ipykernel is pinned below 7: with 7.3.0, executing the widget-heavy notebook 00
-# headlessly (jupyter nbconvert --execute) intermittently deadlocks waiting for an
-# execute reply. 6.x runs it reliably. Interactive use is unaffected either way.
+# ipykernel is pinned below 7: with 7.3.0, executing notebook 00 headlessly
+# (jupyter nbconvert --execute) intermittently deadlocked waiting for an execute
+# reply. That was while notebook 00 still drove its browsers with ipywidgets; its
+# controls are now matplotlib widgets drawn on the figure, so the cause may be
+# gone, but the pin has not been retested. 6.x runs it reliably.
 ipykernel>=6.29,<7
-ipywidgets>=8.0
+# Optional, for notebook 00: PyQt5 gives the signal browser a real window with a
+# pan/zoom toolbar, which is the whole point of that notebook. Not required -
+# plotting.use_external_windows() falls back to Tk (stdlib) and then to inline
+# figures, so everything still runs without it.
+PyQt5>=5.15

@@ -10,6 +10,7 @@ Dataset: Rigotti-Thompson et al. (2026), Dryad doi:10.5061/dryad.brv15dvr9
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -94,17 +95,31 @@ class TrialData:
         )
 
 
+def find_data_file(participant: str, alignment: str, figure: str,
+                   candidate_dirs) -> Path | None:
+    """Find `{figure}_{participant}_{alignment}.h5`, or None if it is not there.
+
+    The non-raising half of `resolve_data_file`. Use this to ask whether a file
+    exists - not every participant has every figure (only T11 and T16 have a
+    fig5 continuous block) - and let the caller decide what to do about it.
+    """
+    filename = f"{figure}_{participant}_{alignment}.h5"
+    for directory in candidate_dirs:
+        candidate = Path(directory) / filename
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def resolve_data_file(participant: str, alignment: str, figure: str,
                       candidate_dirs) -> Path:
     """Find `{figure}_{participant}_{alignment}.h5` in the candidate directories."""
+    candidate_dirs = list(candidate_dirs)
+    path = find_data_file(participant, alignment, figure, candidate_dirs)
+    if path is not None:
+        return path
     filename = f"{figure}_{participant}_{alignment}.h5"
-    searched = []
-    for directory in candidate_dirs:
-        directory = Path(directory)
-        searched.append(str(directory))
-        candidate = directory / filename
-        if candidate.is_file():
-            return candidate
+    searched = [str(Path(d)) for d in candidate_dirs]
     raise FileNotFoundError(
         f"Could not find {filename}. Searched:\n  "
         + "\n  ".join(searched)
@@ -113,19 +128,36 @@ def resolve_data_file(participant: str, alignment: str, figure: str,
     )
 
 
-def _derive_bin_size(t_ms: np.ndarray, path: Path) -> float:
-    """Bin width in seconds, asserted to be uniform rather than assumed to be 20 ms."""
+def _derive_bin_size(t_ms: np.ndarray, path: Path, strict: bool = True) -> float:
+    """Bin width in seconds, derived rather than assumed to be 20 ms.
+
+    `strict` (the trialised files, which the analysis runs on) requires a single
+    uniform step: a varying bin width would silently corrupt every rate and every
+    time axis downstream. The continuous recordings are only ever looked at, and
+    some of them carry a clock that jitters by a millisecond, so they pass
+    `strict=False` and take the median step - reported, not hidden.
+    """
     if t_ms.ndim != 1 or t_ms.size < 2:
         raise ValueError(f"{path.name}: t_data must be a 1-D array of >= 2 bins, "
                          f"got shape {t_ms.shape}.")
     steps = np.diff(t_ms)
     unique_steps = np.unique(np.round(steps, 6))
-    if unique_steps.size != 1:
+    if unique_steps.size == 1:
+        return float(unique_steps[0]) / 1000.0
+    if strict:
         raise ValueError(
             f"{path.name}: t_data is not uniformly spaced; found bin widths "
             f"{unique_steps} ms. The analysis assumes a constant bin width."
         )
-    return float(unique_steps[0]) / 1000.0
+    median_ms = float(np.median(steps))
+    warnings.warn(
+        f"{path.name}: clock steps vary ({unique_steps.min():.0f}-"
+        f"{unique_steps.max():.0f} ms); using the median, {median_ms:.0f} ms. "
+        f"This stream is for viewing only, and its time axis is plotted from the "
+        f"recorded clock, so the jitter is visible rather than smoothed over.",
+        stacklevel=2,
+    )
+    return median_ms / 1000.0
 
 
 def load_trial_data(participant: str, alignment: str, figure: str,
@@ -304,7 +336,7 @@ def load_continuous_data(participant: str, candidate_dirs,
         trials = {k: np.asarray(trial_grp[k][()]).astype(float)
                   for k in _CONT_TRIAL_FIELDS if k in trial_grp}
 
-    bin_s = _derive_bin_size(clock_ms, path)
+    bin_s = _derive_bin_size(clock_ms, path, strict=False)
 
     if neural.ndim != 2:
         raise ValueError(f"{path.name}: expected neural_data_norm to be "

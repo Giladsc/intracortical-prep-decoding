@@ -119,6 +119,13 @@ checksum of the trial set, so the two analyses provably use identical splits.
 **To switch participant:** change one line in `config.py` (`PARTICIPANT = "T11"`) and
 re-run. Fold counts adapt automatically to the number of recording blocks.
 
+Notebook 00 can also switch on its own, without touching `config.py`: set
+`BROWSE["participant"]` in its first cell (`None` hands control back to `config.py`).
+That override is local to that notebook's session — notebooks 01–04 always follow
+`config.py`, so the analysis cannot silently run on a participant you only meant to
+look at. Note that T5 has no continuous recording, so notebook 00 skips its sections
+1–6 there and goes straight to the fig1 epoch views.
+
 ## 6. What the HDF5 variables mean
 
 | field | shape | meaning |

@@ -16,11 +16,15 @@ never carried by colour alone.
 
 from __future__ import annotations
 
+import importlib.util
+import warnings
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.patches import Rectangle
+from matplotlib.widgets import Slider
 
 # Validated 8-step cyclic direction scale, indexed by direction class 0..7
 # (0 = 0 deg = rightward, increasing counter-clockwise in 45 deg steps).
@@ -77,6 +81,269 @@ def use_house_style() -> None:
         "lines.linewidth": 2.0,
         "lines.markersize": 5,
     })
+
+
+# ---------------------------------------------------------------------------
+# Where a figure appears: inline in the page, or in its own window
+# ---------------------------------------------------------------------------
+# Inline PNGs are fine for a figure you read once. They are useless for
+# *browsing*: you cannot zoom into a 25 s window to check which side of a
+# trigger the EMG starts on. A GUI backend gives every figure a real OS window
+# with matplotlib's pan/zoom/save toolbar. Tk ships with Python and so needs no
+# install; Qt is preferred when it happens to be there.
+_GUI_BACKENDS = {"qt": "QtAgg", "tk": "TkAgg", "macosx": "MacOSX"}
+
+# The bindings that have to import for a toolkit to be usable. Checked up front,
+# because asking for a toolkit that is not installed is not a free failure - see
+# use_external_windows below.
+_GUI_BINDINGS = {
+    "qt": ("PyQt6", "PySide6", "PyQt5", "PySide2"),
+    "tk": ("tkinter",),
+    "macosx": ("matplotlib.backends._macosx",),
+}
+
+# name -> number of the figure currently occupying that window
+_WINDOWS: dict[str, int] = {}
+
+
+def figures_are_windowed() -> bool:
+    """True when the active backend draws into an OS window, not into the page."""
+    backend = mpl.get_backend().lower()
+    return not (backend.startswith("module://")          # inline, ipympl, nbagg
+                or backend in {"agg", "pdf", "svg", "ps", "template"})
+
+
+def use_external_windows(prefer=("qt", "tk"), dpi=85) -> str | None:
+    """Open figures in their own window instead of inline. Returns the backend.
+
+    Tries each toolkit in `prefer` and keeps the first that loads. Returns None
+    and leaves figures inline if none does - which is what has to happen under a
+    headless run (`jupyter nbconvert --execute`), so the notebook can still
+    render the PNGs that are stored in it.
+
+    `dpi` sets the on-screen figure resolution. These browsers are 12 inches
+    wide, which at the inline default of 110 dpi is a 1320 px window before the
+    OS frame is added - taller than a laptop screen once the channel stack grows.
+    Saved files keep their own resolution.
+    """
+    try:
+        from IPython import get_ipython
+        ipython = get_ipython()
+    except ImportError:
+        ipython = None
+
+    for gui in prefer:
+        # Ask only for toolkits that are actually installed. A failed request is
+        # not free: IPython records the toolkit it tried even when the import
+        # raised, and then refuses to switch to any other one for the rest of
+        # the session - so blindly trying Qt first would break Tk here *and*
+        # break a %matplotlib tk the reader types later.
+        if not any(_importable(binding) for binding in _GUI_BINDINGS.get(gui, ())):
+            continue
+        try:
+            if ipython is not None:
+                # The magic also hooks the toolkit's event loop into the kernel.
+                # mpl.use() alone gives you a window that never repaints.
+                ipython.run_line_magic("matplotlib", gui)
+            else:
+                plt.switch_backend(_GUI_BACKENDS[gui])
+        except Exception:
+            # Installed but broken (a half-upgraded Qt does this). Clear the
+            # selection IPython just cached, or the next candidate inherits it.
+            if ipython is not None:
+                ipython.pylab_gui_select = None
+            continue
+        if figures_are_windowed():
+            if dpi:
+                # savefig.dpi defaults to the string "figure", meaning it tracks
+                # figure.dpi. Pin it before lowering the screen dpi, so saved
+                # files do not silently shrink along with the window.
+                if mpl.rcParams["savefig.dpi"] == "figure":
+                    mpl.rcParams["savefig.dpi"] = mpl.rcParams["figure.dpi"]
+                mpl.rcParams["figure.dpi"] = dpi
+            return mpl.get_backend()
+    return None
+
+
+def _importable(module: str) -> bool:
+    """Can this module be found? Finding it is not proof that it imports."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _remember_geometry(manager):
+    """This window's size and position, in whatever form its toolkit stores it."""
+    window = getattr(manager, "window", None)
+    if window is None:
+        return None
+    if hasattr(window, "wm_geometry"):
+        return ("tk", window.wm_geometry())
+    if hasattr(window, "saveGeometry"):
+        return ("qt", window.saveGeometry())
+    return None
+
+
+def _restore_geometry(manager, remembered) -> None:
+    window = getattr(manager, "window", None)
+    if remembered is None or window is None:
+        return
+    kind, value = remembered
+    try:
+        if kind == "tk" and hasattr(window, "wm_geometry"):
+            window.wm_geometry(value)
+        elif kind == "qt" and hasattr(window, "restoreGeometry"):
+            window.restoreGeometry(value)
+    except Exception:
+        pass
+
+
+def show(fig, name: str = "figure"):
+    """Display `fig` - in the window called `name`, when windows are in use.
+
+    The name is what makes the slider cells usable. Every slider move builds a
+    fresh figure, so without this each drag would open a window of its own and
+    you would end up with thirty. Showing under a name replaces whatever was in
+    that window before, keeping its size and position, so one browser stays one
+    window that you can leave open beside the notebook.
+
+    Falls through to a plain inline `plt.show()` whenever figures are not
+    windowed, so the same cell works either way.
+    """
+    if not figures_are_windowed():
+        plt.show()
+        return fig
+
+    manager = fig.canvas.manager
+    previous = _WINDOWS.get(name)
+    if previous is not None and previous != fig.number and plt.fignum_exists(previous):
+        _restore_geometry(manager,
+                          _remember_geometry(plt.figure(previous).canvas.manager))
+        plt.close(previous)
+    _WINDOWS[name] = fig.number
+
+    if manager is not None:
+        try:
+            manager.set_window_title(name)
+        except Exception:
+            pass
+    plt.show(block=False)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Controls that live on the figure
+# ---------------------------------------------------------------------------
+# The sliders are matplotlib widgets drawn onto the figure itself, not notebook
+# widgets sitting above it. Two reasons. They travel with the window - drag it
+# to a second screen and the controls come along, instead of staying behind in
+# the notebook where you cannot see the plot you are steering. And they need no
+# frontend: the same cell works in JupyterLab, in VS Code and in a plain script,
+# where ipywidgets needs a live kernel *and* a frontend that renders widgets.
+SLIDER_HEIGHT = 0.022       # figure fraction: height of one slider track
+SLIDER_PITCH = 0.045        # figure fraction: vertical distance between rows
+SLIDER_TOP_PAD = 0.015      # gap above the first row
+SLIDER_GAP = 0.030          # gap between the last row and the plot below it
+
+
+def slider(label, vmin, vmax, value=None, step=None, fmt=None) -> dict:
+    """One control for `browse`. Integer bounds and step give an integer value.
+
+    Integers matter: a trial index has to arrive at the draw function as `7`,
+    not as `7.0`, or it cannot index an array. The test is on the type you
+    declare, not the value, so 0.0 to 75.0 stays a float control.
+    """
+    integral = all(isinstance(v, (int, np.integer))
+                   for v in (vmin, vmax, step, value) if v is not None)
+    return {"label": label, "vmin": vmin, "vmax": vmax, "step": step,
+            "value": vmin if value is None else value,
+            "fmt": fmt or ("%d" if integral else "%.4g"),
+            "integral": integral}
+
+
+def browse(draw, name="browser", figsize=(12, 8), **controls):
+    """A figure that carries its own sliders across the top.
+
+    `draw(fig, top, **values)` redraws for the current slider values, and must
+    keep below `top` in figure fractions - which the plot_* functions do for you
+    when handed `fig=fig, top=top`. Each keyword is a `slider(...)`, passed to
+    `draw` under the name it was declared with, in declaration order.
+
+    Keep the returned figure in a variable. The slider callbacks are only
+    reachable through it, and a figure that gets garbage collected takes its
+    controls with it.
+
+    Inline backends deliver no mouse events, so there the figure is drawn once
+    at the initial values with no slider strip - a plain static figure, which is
+    what a headless run should be storing anyway.
+    """
+    values = {key: (int(spec["value"]) if spec["integral"] else spec["value"])
+              for key, spec in controls.items()}
+
+    if not figures_are_windowed():
+        fig = plt.figure(figsize=figsize)
+        draw(fig, 1.0, **values)
+        plt.show()
+        return fig
+
+    fig = plt.figure(figsize=figsize)
+    n = len(controls)
+    top = 1.0 - SLIDER_TOP_PAD - SLIDER_PITCH * (n - 1) - SLIDER_HEIGHT - SLIDER_GAP
+
+    fig.sliders = {}
+    for row, (key, spec) in enumerate(controls.items()):
+        bottom = 1.0 - SLIDER_TOP_PAD - SLIDER_PITCH * row - SLIDER_HEIGHT
+        axis = fig.add_axes((0.22, bottom, 0.56, SLIDER_HEIGHT))
+        # Two flags that keep the strip stable. `_is_control` exempts the axes
+        # from the clear that every redraw starts with, so the widget survives -
+        # rebuilding it mid-drag would drop the drag. `set_in_layout(False)`
+        # keeps tight/constrained layout from treating it as a panel to place.
+        axis._is_control = True
+        axis.set_in_layout(False)
+        widget = Slider(axis, spec["label"], spec["vmin"], spec["vmax"],
+                        valinit=spec["value"], valstep=spec["step"],
+                        valfmt=spec["fmt"], color=ACCENT, initcolor="none")
+        for text in (widget.label, widget.valtext):
+            text.set_fontsize(9)
+            text.set_color(INK)
+        fig.sliders[key] = widget
+
+    def redraw(_=None):
+        for key, widget in fig.sliders.items():
+            values[key] = (int(round(widget.val)) if controls[key]["integral"]
+                           else float(widget.val))
+        draw(fig, top, **values)
+        fig.canvas.draw_idle()
+
+    for widget in fig.sliders.values():
+        widget.on_changed(redraw)
+
+    redraw()
+    return show(fig, name)
+
+
+def _fit_layout(fig, top) -> None:
+    """`fig.tight_layout` without the warning our own control strip provokes.
+
+    tight_layout ignores axes that have no subplotspec, which is exactly the
+    treatment the slider strip wants - it is positioned by hand and must stay
+    where it was put. But it says so with a warning, which is fair in general
+    and wrong here, and which would otherwise fire on every drag of a slider.
+    """
+    with warnings.catch_warnings():
+        if any(getattr(axis, "_is_control", False) for axis in fig.axes):
+            warnings.filterwarnings(
+                "ignore", message=".*not compatible with tight_layout.*")
+        fig.tight_layout(rect=(0, 0, 1, top))
+
+
+def _clear_content(fig) -> None:
+    """Drop the previous frame, leaving any on-figure controls in place."""
+    for axis in list(fig.axes):
+        if getattr(axis, "_is_control", False):
+            continue
+        axis.remove()
 
 
 def direction_legend_labels(centres_rad: np.ndarray) -> list[str]:
@@ -361,7 +628,7 @@ def _draw_events(ax, events, xlim, label=True):
 def plot_signal_browser(t_s, signals, labels, events=None, aux=None,
                         start_s=None, duration_s=10.0, n_channels=20,
                         scale=None, units="a.u.", title="",
-                        xlabel="time (s)", figsize=None):
+                        xlabel="time (s)", figsize=None, fig=None, top=1.0):
     """MNE raw.plot-style stacked browser over a continuous signal.
 
     t_s      (n_samples,)             time axis in seconds
@@ -372,6 +639,11 @@ def plot_signal_browser(t_s, signals, labels, events=None, aux=None,
     scale    vertical spacing between channels, in signal units. None => a
              robust automatic value (4x the median channel SD), the way MNE
              picks a default and then lets you change it.
+    fig      draw into this figure instead of making one, clearing it first.
+             `browse` passes the figure it owns, so that dragging a slider
+             redraws one window rather than building a new one every time.
+    top      fraction of the figure height the plot may use. `browse` reserves
+             the strip above it for the sliders.
     """
     t_s = np.asarray(t_s, dtype=float)
     signals = np.asarray(signals, dtype=float)
@@ -398,12 +670,18 @@ def plot_signal_browser(t_s, signals, labels, events=None, aux=None,
     n_aux = len(aux) if aux else 0
     if figsize is None:
         figsize = (12, max(4.0, 0.32 * n_show + 0.7 * n_aux + 1.6))
+    if fig is None:
+        fig = plt.figure(figsize=figsize)
+    else:
+        # Reused figure: wipe the previous frame, keep the window, its size and
+        # any sliders drawn on it.
+        _clear_content(fig)
     if n_aux:
-        fig, (ax, ax_aux) = plt.subplots(
-            2, 1, figsize=figsize, sharex=True,
+        ax, ax_aux = fig.subplots(
+            2, 1, sharex=True,
             gridspec_kw={"height_ratios": [max(3, 0.32 * n_show), 0.55 * n_aux]})
     else:
-        fig, ax = plt.subplots(figsize=figsize)
+        ax = fig.subplots()
         ax_aux = None
 
     # Channels stacked top-to-bottom, as MNE draws them.
@@ -456,12 +734,13 @@ def plot_signal_browser(t_s, signals, labels, events=None, aux=None,
     else:
         ax.set_xlabel(xlabel)
 
-    fig.tight_layout()
+    _fit_layout(fig, top)
     return fig
 
 
 def plot_epoch_browser(t_ms, epoch, labels, events=None, aux=None,
-                       n_channels=20, scale=None, units="Hz", title=""):
+                       n_channels=20, scale=None, units="Hz", title="",
+                       fig=None, top=1.0):
     """MNE epochs.plot-style view of ONE trial: channels stacked over time.
 
     epoch  (n_bins, n_channels) for a single trial, in Hz.
@@ -473,13 +752,13 @@ def plot_epoch_browser(t_ms, epoch, labels, events=None, aux=None,
         events=events, aux=aux,
         start_s=float(t_ms[0]), duration_s=float(t_ms[-1] - t_ms[0]),
         n_channels=n_channels, scale=scale, units=units, title=title,
-        xlabel="time from target onset (ms)",
+        xlabel="time from target onset (ms)", fig=fig, top=top,
     )
 
 
 def plot_epochs_image(t_ms, trials, sort_labels, centres_rad,
                       go_cue_times_ms=(), prep_window_ms=None, title="",
-                      cmap="Blues"):
+                      cmap="Blues", fig=None, top=1.0):
     """MNE epochs.plot_image-style erpimage for one channel.
 
     trials       (n_trials, n_bins) firing rate in Hz for a single channel
@@ -487,6 +766,9 @@ def plot_epochs_image(t_ms, trials, sort_labels, centres_rad,
 
     A firing rate is a magnitude, so the heatmap uses a single-hue sequential
     ramp - never a rainbow, and never diverging around an arbitrary midpoint.
+
+    `fig` and `top` are as in plot_signal_browser: draw into an existing figure,
+    keeping out of the strip above `top` that `browse` reserves for sliders.
     """
     trials = np.asarray(trials, dtype=float)
     sort_labels = np.asarray(sort_labels)
@@ -497,7 +779,14 @@ def plot_epochs_image(t_ms, trials, sort_labels, centres_rad,
 
     # A dedicated colourbar column, so the image and the mean panel below it keep
     # exactly the same width - otherwise the shared time axis reads as misaligned.
-    fig = plt.figure(figsize=(9.0, 7.2), layout="constrained")
+    if fig is None:
+        fig = plt.figure(figsize=(9.0, 7.2), layout="constrained")
+    else:
+        _clear_content(fig)
+        fig.set_layout_engine("constrained")
+    # Constrained layout takes the reserved strip as a rect, where tight_layout
+    # takes it as `rect=`.
+    fig.get_layout_engine().set(rect=(0, 0, 1, top))
     gs = fig.add_gridspec(2, 2, width_ratios=[40, 1.2], height_ratios=[3, 1.5])
     ax_img = fig.add_subplot(gs[0, 0])
     ax_mean = fig.add_subplot(gs[1, 0], sharex=ax_img)

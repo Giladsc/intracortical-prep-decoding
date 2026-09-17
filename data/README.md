@@ -31,6 +31,11 @@ preprocessing (causal exponential smoothing, z-scored). Notebook 00 uses it **on
 looking at the signal** — no number from it enters any result. Skip it if you only want the
 epoch views; notebook 00 will tell you the file is missing and the rest still runs.
 
+**A continuous block exists for T11 and T16 only.** T5 has the fig1 task and nothing else,
+so under `PARTICIPANT = "T5"` notebook 00 skips its sections 1–6 and goes straight to the
+fig1 epoch views. `config.available_participants("continuous", "fig5")` reports this from
+what is actually on disk.
+
 Do not download the whole 1.54 GB archive unless you want the other tasks (finger
 movements, curved reaches, the Pac-Man task, closed-loop control).
 

@@ -12,7 +12,17 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 # Data selection
 # --------------------------------------------------------------------------
-PARTICIPANT = "T16"      # "T5" | "T11" | "T16"
+PARTICIPANTS = ("T5", "T11", "T16")
+
+PARTICIPANT = "T5"      # one of PARTICIPANTS
+# All three have the fig1 task. Only T11 and T16 also have a fig5 continuous
+# block, so notebook 00's raw browser skips itself on T5 - see
+# `available_participants` below.
+#
+# A notebook can override this for its own session with `select_participant`,
+# without editing this file. The value set here stays the default that
+# `select_participant(None)` returns to.
+_PARTICIPANT_DEFAULT = PARTICIPANT
 FIGURE = "fig1"          # radial-8 attempted wrist movement task
 ALIGNMENT = "delay"      # "delay" (t=0 at target onset) | "move" (t=0 at movement start)
 
@@ -76,6 +86,52 @@ def candidate_data_dirs() -> list[Path]:
     dirs.append(PROJECT_ROOT / "data")
     dirs.append(PROJECT_ROOT.parent)   # the Dryad download sits here
     return dirs
+
+
+def find_data_file(alignment: str, figure: str | None = None,
+                   participant: str | None = None):
+    """Path to one data file, or None if it is not on disk.
+
+    Defaults to the participant and figure selected above, so a notebook can ask
+    `config.find_data_file("continuous", figure="fig5")` before trying to load it.
+    """
+    from src.data_loading import find_data_file as _find   # local: keep config dependency-free
+    return _find(participant or PARTICIPANT,
+                 alignment,
+                 figure or FIGURE,
+                 candidate_data_dirs())
+
+
+def select_participant(participant: str | None = None) -> str:
+    """Point this session at a participant, without editing this file.
+
+    Rebinds the module-level `PARTICIPANT`, so everything that reads
+    `config.PARTICIPANT` - including `find_data_file` below - follows along.
+    Passing None restores whatever this file selects, which keeps the calling
+    cell idempotent: re-running it after an override does not leave the old one
+    in place.
+
+    Returns the participant now selected.
+    """
+    global PARTICIPANT
+    if participant is None:
+        PARTICIPANT = _PARTICIPANT_DEFAULT
+        return PARTICIPANT
+    participant = str(participant).strip()
+    if participant not in PARTICIPANTS:
+        raise ValueError(
+            f"Unknown participant {participant!r}. Expected one of "
+            f"{', '.join(PARTICIPANTS)}."
+        )
+    PARTICIPANT = participant
+    return PARTICIPANT
+
+
+def available_participants(alignment: str, figure: str | None = None,
+                           participants=PARTICIPANTS) -> list[str]:
+    """Which of `participants` actually have this file on disk."""
+    return [p for p in participants
+            if find_data_file(alignment, figure, participant=p) is not None]
 
 
 def ensure_output_dirs() -> None:
